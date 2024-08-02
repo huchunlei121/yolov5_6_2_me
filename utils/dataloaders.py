@@ -99,7 +99,7 @@ def seed_worker(worker_id):
 
 
 def create_dataloader(path,
-                      imgsz,
+                      imgsz,  # 保证输入check_img_size后，同时的要是gz 最大值的两倍的尺寸
                       batch_size,
                       stride,
                       single_cls=False,
@@ -117,6 +117,7 @@ def create_dataloader(path,
     if rect and shuffle:
         LOGGER.warning('WARNING: --rect is incompatible with DataLoader shuffle, setting shuffle=False')
         shuffle = False
+    # LoadimagesAndLabels是其核心类,它继承在torch.utils.Datasets.Dataset
     with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
         dataset = LoadImagesAndLabels(
             path,
@@ -134,11 +135,13 @@ def create_dataloader(path,
 
     batch_size = min(batch_size, len(dataset))
     nd = torch.cuda.device_count()  # number of CUDA devices
+    # num works,通常情况下是服务器cpu的数量,然而在windows情况下,这一参数需要被设置为0,不然会出现Broken Pipe的情况
     nw = min([os.cpu_count() // max(nd, 1), batch_size if batch_size > 1 else 0, workers])  # number of workers
     sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
     loader = DataLoader if image_weights else InfiniteDataLoader  # only DataLoader allows for attribute updates
     generator = torch.Generator()
     generator.manual_seed(0)
+    # 将数据集变成数据加载器
     return loader(dataset,
                   batch_size=batch_size,
                   shuffle=shuffle and sampler is None,
@@ -406,7 +409,6 @@ def img2label_paths(img_paths):
     sa, sb = f'{os.sep}images{os.sep}', f'{os.sep}labels{os.sep}'  # /images/, /labels/ substrings
     return [sb.join(x.rsplit(sa, 1)).rsplit('.', 1)[0] + '.txt' for x in img_paths]
 
-
 class LoadImagesAndLabels(Dataset):
     # YOLOv5 train_loader/val_loader, loads images and labels for training and validation
     cache_version = 0.6  # dataset labels *.cache version
@@ -438,6 +440,7 @@ class LoadImagesAndLabels(Dataset):
 
         try:
             f = []  # image files
+            # 判断数据集的标签是文件夹还是文件
             for p in path if isinstance(path, list) else [path]:
                 p = Path(p)  # os-agnostic
                 if p.is_dir():  # dir
@@ -451,23 +454,33 @@ class LoadImagesAndLabels(Dataset):
                         # f += [p.parent / x.lstrip(os.sep) for x in t]  # local to global path (pathlib)
                 else:
                     raise FileNotFoundError(f'{prefix}{p} does not exist')
+            # 处理得到文件名
             self.im_files = sorted(x.replace('/', os.sep) for x in f if x.split('.')[-1].lower() in IMG_FORMATS)
             # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in IMG_FORMATS])  # pathlib
             assert self.im_files, f'{prefix}No images found'
         except Exception as e:
             raise Exception(f'{prefix}Error loading data from {path}: {e}\nSee {HELP_URL}')
 
+        # 根据图片名字找到对应的labels
         # Check cache
         self.label_files = img2label_paths(self.im_files)  # labels
+        # 当第一次读取数据集时，YOLOv5 会将标签文件处理并缓存起来。之后，再次读取数据集时，直接使用缓存文件，这里是判断是否有cache文件
         cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix('.cache')
         try:
             cache, exists = np.load(cache_path, allow_pickle=True).item(), True  # load dict
             assert cache['version'] == self.cache_version  # matches current version
+            # 对于每一个数据集的cache文件中,会生成一个Hash Code,这个code是通过数据集的大小计算得到的,因此在读取cache之前会检查Hash Code是否匹配
             assert cache['hash'] == get_hash(self.label_files + self.im_files)  # identical hash
         except Exception:
             cache, exists = self.cache_labels(cache_path, prefix), False  # run cache ops
 
         # Display cache
+        # cache文件中包含了很多其他信息
+        # nf 已经根据标签寻找到的图片
+        # nm 只有标签但是没有找到图片
+        # ne 标签为空
+        # corrupted 损坏的图片
+        # total 总共的标签文件
         nf, nm, ne, nc, n = cache.pop('results')  # found, missing, empty, corrupt, total
         if exists and LOCAL_RANK in {-1, 0}:
             d = f"Scanning '{cache_path}' images and labels... {nf} found, {nm} missing, {ne} empty, {nc} corrupt"
@@ -476,6 +489,7 @@ class LoadImagesAndLabels(Dataset):
                 LOGGER.info('\n'.join(cache['msgs']))  # display warnings
         assert nf > 0 or not augment, f'{prefix}No labels in {cache_path}. Can not train without labels. See {HELP_URL}'
 
+        # 读取cache的信息,包括hash码,cache的版本号,以及cache的标签,图片的shape,标签和图片的路径等
         # Read cache
         [cache.pop(k) for k in ('hash', 'version', 'msgs')]  # remove items
         labels, shapes, self.segments = zip(*cache.values())
@@ -505,7 +519,7 @@ class LoadImagesAndLabels(Dataset):
                     self.segments[i][:, 0] = 0
 
         # Rectangular Training
-        if self.rect:
+        if self.rect: # 获取图片resize的shape
             # Sort by aspect ratio
             s = self.shapes  # wh
             ar = s[:, 1] / s[:, 0]  # aspect ratio
@@ -529,6 +543,7 @@ class LoadImagesAndLabels(Dataset):
             self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
 
         # Cache images into RAM/disk for faster training (WARNING: large datasets may exceed system resources)
+        # 将图片加载到内存中,此处使用了多线程加载图片,可以很快的提高速度
         self.ims = [None] * n
         self.npy_files = [Path(f).with_suffix('.npy') for f in self.im_files]
         if cache_images:
@@ -549,6 +564,7 @@ class LoadImagesAndLabels(Dataset):
     def cache_labels(self, path=Path('./labels.cache'), prefix=''):
         # Cache dataset labels, check images and read shapes
         x = {}  # dict
+        # 初始化数据集的数量信息
         nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
         desc = f"{prefix}Scanning '{path.parent / path.stem}' images and labels..."
         with Pool(NUM_THREADS) as pool:
@@ -598,12 +614,13 @@ class LoadImagesAndLabels(Dataset):
 
         hyp = self.hyp
         mosaic = self.mosaic and random.random() < hyp['mosaic']
+        # 对图片进行切割  根据__init__()加载四张图片进行一次mosaic
         if mosaic:
             # Load mosaic
             img, labels = self.load_mosaic(index)
             shapes = None
 
-            # MixUp augmentation
+            # MixUp augmentation 图像融合
             if random.random() < hyp['mixup']:
                 img, labels = mixup(img, labels, *self.load_mosaic(random.randint(0, self.n - 1)))
 
@@ -612,12 +629,15 @@ class LoadImagesAndLabels(Dataset):
             img, (h0, w0), (h, w) = self.load_image(index)
 
             # Letterbox
+            # 对图片以及标签的size进行处理
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+            # 图像大小的缩放
             img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
             shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
 
             labels = self.labels[index].copy()
             if labels.size:  # normalized xywh to pixel xyxy format
+                # 将坐标从（中心点x,y,w,h）->(左上，右下)
                 labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
 
             if self.augment:
@@ -694,7 +714,9 @@ class LoadImagesAndLabels(Dataset):
         # YOLOv5 4-mosaic loader. Loads 1 image + 3 random images into a 4-image mosaic
         labels4, segments4 = [], []
         s = self.img_size
+        # mosaic的中心坐标随机[0.5*s, 1.5*s]的随机值
         yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.mosaic_border)  # mosaic center x, y
+        # 当前图像+随机三张图像
         indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
         random.shuffle(indices)
         for i, index in enumerate(indices):
@@ -703,8 +725,20 @@ class LoadImagesAndLabels(Dataset):
 
             # place img in img4
             if i == 0:  # top left
+                # 第一张图像放在左上方
+                # 产生一个背景图像shape是(s * 2, s * 2, 3)，颜色114
                 img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
-                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
+                # 基于xc和yc这个中心点计算坐标信息
+                """
+                    不管中心坐标如何选择，第一张图片右下坐标是一定就是mosaic的中心坐标（xc, yc）
+                    因为中心坐标（xc, yc）在（0.5*s, 1.5*s）范围呢，所以第一张图片会存在四种情况：h或者w=s
+                    第一、二种就是h>yc 或者 w>xc, 左上角坐标(0, yc - h) 或者 (xc - w, 0)
+                    第三种就是h>yc and w>xc, 左上角坐标(0, 0)
+                    第四种就是h<yc and w<xc, 左上角坐标(xc - w, yc - h)
+                    因此合并就是 max(xc - w, 0), max(yc - h, 0), xc, yc 
+                """
+                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image 背景图中的坐标取值)
+                # 原图像的坐标范围
                 x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h  # xmin, ymin, xmax, ymax (small image)
             elif i == 1:  # top right
                 x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
@@ -720,7 +754,9 @@ class LoadImagesAndLabels(Dataset):
             padw = x1a - x1b
             padh = y1a - y1b
 
-            # Labels
+
+
+            # Labels 标签做融合
             labels, segments = self.labels[index].copy(), self.segments[index].copy()
             if labels.size:
                 labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)  # normalized xywh to pixel xyxy format
@@ -728,7 +764,7 @@ class LoadImagesAndLabels(Dataset):
             labels4.append(labels)
             segments4.extend(segments)
 
-        # Concat/clip labels
+        # Concat/clip labels 标签截断，把超出融合图片的物体标签置0
         labels4 = np.concatenate(labels4, 0)
         for x in (labels4[:, 1:], *segments4):
             np.clip(x, 0, 2 * s, out=x)  # clip when using random_perspective()
@@ -831,6 +867,7 @@ class LoadImagesAndLabels(Dataset):
             lb[:, 0] = i  # add target image index for build_targets()
         return torch.stack(im, 0), torch.cat(label, 0), path, shapes
 
+    # 将图像切割成四份重新组合在一起
     @staticmethod
     def collate_fn4(batch):
         img, label, path, shapes = zip(*batch)  # transposed

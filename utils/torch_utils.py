@@ -278,11 +278,15 @@ def model_info(model, verbose=False, imgsz=640):
             name = name.replace('module_list.', '')
             print('%5g %40s %9s %12g %20s %10.3g %10.3g' %
                   (i, name, p.requires_grad, p.numel(), list(p.shape), p.mean(), p.std()))
-
-    try:  # FLOPs
+    # FLOPS是处理器性能的衡量指标，是“每秒所执行的浮点运算次数”的缩写
+    try:  # FLOPs是算法复杂度的衡量指标，是“浮点运算次数”的缩写，s代表的是复数。
         p = next(model.parameters())
         stride = max(int(model.stride.max()), 32) if hasattr(model, 'stride') else 32  # max stride
         im = torch.zeros((1, p.shape[1], stride, stride), device=p.device)  # input image in BCHW format
+        # MACs 是模型中所有乘加运算（即一个乘法和一个加法）的总数 所有浮点运算的总数，包括加、减、乘、除等运算
+        # GFLOPs 指的是每秒十亿次浮点运算（Giga Floating Point Operations per Second）
+        # 由于 macs, params = thop.profile(model, inputs=(input, ))
+        # GFLOPs和FLOPs是1e9关系，后面乘以2则认为FLOPs是MACs的2倍
         flops = thop.profile(deepcopy(model), inputs=(im,), verbose=False)[0] / 1E9 * 2  # stride GFLOPs
         imgsz = imgsz if isinstance(imgsz, list) else [imgsz, imgsz]  # expand if int/float
         fs = f', {flops * imgsz[0] / stride * imgsz[1] / stride:.1f} GFLOPs'  # 640x640 GFLOPs

@@ -1,9 +1,10 @@
 # YOLOv5 🚀 by Ultralytics, GPL-3.0 license
 
 # Parameters
+ch: 3
 nc: 80  # number of classes
-depth_multiple: 0.33  # model depth multiple
-width_multiple: 0.50  # layer channel multiple
+depth_multiple: 0.33  # model depth multiple 控制模型深度 ，需要乘上number，控制模块重复次数
+width_multiple: 0.50  # layer channel multiple 控制宽度，需要乘上args[0]-控制输出通道数
 anchors:
   - [10,13, 16,30, 33,23]  # P3/8
   - [30,61, 62,45, 59,119]  # P4/16

@@ -2,7 +2,7 @@
 """
 AutoAnchor utils
 """
-
+import os
 import random
 
 import numpy as np
@@ -16,11 +16,13 @@ PREFIX = colorstr('AutoAnchor: ')
 
 
 def check_anchor_order(m):
+    # 保证anchors和stride的顺序一致
     # Check anchor order against stride order for YOLOv5 Detect() module m, and correct if necessary
+    # prod()是所有元素相乘
     a = m.anchors.prod(-1).mean(-1).view(-1)  # mean anchor area per output layer
     da = a[-1] - a[0]  # delta a
     ds = m.stride[-1] - m.stride[0]  # delta s
-    if da and (da.sign() != ds.sign()):  # same order
+    if da and (da.sign() != ds.sign()):  # same order sign()方法就是阶段函数，大于0是1，小于0是负一，等于0是0
         LOGGER.info(f'{PREFIX}Reversing anchor order')
         m.anchors[:] = m.anchors.flip(0)
 
@@ -28,9 +30,9 @@ def check_anchor_order(m):
 def check_anchors(dataset, model, thr=4.0, imgsz=640):
     # Check anchor fit to data, recompute if necessary
     m = model.module.model[-1] if hasattr(model, 'module') else model.model[-1]  # Detect()
-    shapes = imgsz * dataset.shapes / dataset.shapes.max(1, keepdims=True)
+    shapes = imgsz * dataset.shapes / dataset.shapes.max(1, keepdims=True)  # 将imgsz按照dataset读入图片的shape的宽高比例进行调整，例如：dataset.shapes / dataset.shapes.max(1)某行的比例值是【1，0，75】，则imgsz[0]就全保留
     scale = np.random.uniform(0.9, 1.1, size=(shapes.shape[0], 1))  # augment scale
-    wh = torch.tensor(np.concatenate([l[:, 3:5] * s for s, l in zip(shapes * scale, dataset.labels)])).float()  # wh
+    wh = torch.tensor(np.concatenate([l[:, 3:5] * s for s, l in zip(shapes * scale, dataset.labels)])).float()  # wh 这就得到了真实anchor在映射回imgsz上宽高
 
     def metric(k):  # compute metric
         r = wh[:, None] / k[None]
@@ -112,9 +114,10 @@ def kmean_anchors(dataset='./data/coco128.yaml', n=9, img_size=640, thr=4.0, gen
 
     if isinstance(dataset, str):  # *.yaml file
         with open(dataset, errors='ignore') as f:
-            data_dict = yaml.safe_load(f)  # model dict
+            data_dict = yaml.safe_load(f)  # model dict 其中：{'path': '../datasets/coco128', 'train': 'images/train2017', 'val': 'images/train2017',...}
         from utils.dataloaders import LoadImagesAndLabels
-        dataset = LoadImagesAndLabels(data_dict['train'], augment=True, rect=True)
+        # dataset = LoadImagesAndLabels(data_dict['train'], augment=True, rect=True)
+        dataset = LoadImagesAndLabels(os.path.join(data_dict['path'], data_dict['train']), augment=True, rect=True)
 
     # Get label wh
     shapes = img_size * dataset.shapes / dataset.shapes.max(1, keepdims=True)

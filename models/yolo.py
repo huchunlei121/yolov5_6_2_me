@@ -44,10 +44,16 @@ class Detect(nn.Module):
         super().__init__()
         self.nc = nc  # number of classes
         self.no = nc + 5  # number of outputs per anchor
-        self.nl = len(anchors)  # number of detection layers
+        self.nl = len(anchors)  # number of detection layersrequirs
         self.na = len(anchors[0]) // 2  # number of anchors
         self.grid = [torch.zeros(1)] * self.nl  # init grid
         self.anchor_grid = [torch.zeros(1)] * self.nl  # init anchor grid
+        """
+        torch.randn(2, 3) 创建一个tensor对象，可以看作一个常量，反向传播的时候参数不会更新（requires_gard=False）,这个方式认为是常量，所以持久化的时候不会持久化
+        nn.Parameter(torch.randn(2, 3)), 创建变量，反向传播会更新（requires_gard=True）
+        """
+        # register_buffer()的作用是将anchors作为常量保存在state_state_dict中，在模型不变的情况再次运行就无需再次加载,不会更新同时还可以持久化
+        # https://blog.csdn.net/qq_43391414/article/details/121060866
         self.register_buffer('anchors', torch.tensor(anchors).float().view(self.nl, -1, 2))  # shape(nl,na,2)
         self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
@@ -166,6 +172,7 @@ class DetectionModel(BaseModel):
         if anchors:
             LOGGER.info(f'Overriding model.yaml anchors with anchors={anchors}')
             self.yaml['anchors'] = round(anchors)  # override yaml value
+        # 基于yaml配置文件进行构建模型
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         self.inplace = self.yaml.get('inplace', True)
@@ -173,11 +180,12 @@ class DetectionModel(BaseModel):
         # Build strides, anchors
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):
-            s = 256  # 2x min stride
+            s = 256  # 2x min stride 这里s代表输入图片最小纬度256*256
             m.inplace = self.inplace
+            # 缩放比例
             m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
             check_anchor_order(m)  # must be in pixel-space (not grid-space)
-            m.anchors /= m.stride.view(-1, 1, 1)
+            m.anchors /= m.stride.view(-1, 1, 1)  # 这样anchors就映射成最后一层特征图的大小上的anchors
             self.stride = m.stride
             self._initialize_biases()  # only run once
 
@@ -191,11 +199,12 @@ class DetectionModel(BaseModel):
             return self._forward_augment(x)  # augmented inference, None
         return self._forward_once(x, profile, visualize)  # single-scale inference, train
 
+    # 这种是推理的时候会做图像增强，将预测的图像按照s的三种比例缩放后进行推理，这样推理的效果会更好，但是会影响推理速度，实际使用过程中，使用三台服务器去分别推理缩放后的图片
     def _forward_augment(self, x):
-        img_size = x.shape[-2:]  # height, width
-        s = [1, 0.83, 0.67]  # scales
+        img_size = x.shape[-2:]  # height, width 图像的原始大小
+        s = [1, 0.83, 0.67]  # scales  预测过程中图像缩放比
         f = [None, 3, None]  # flips (2-ud, 3-lr)
-        y = []  # outputs
+        y = []  # outputs 输出结果的临时保存对象
         for si, fi in zip(s, f):
             xi = scale_img(x.flip(fi) if fi else x, si, gs=int(self.stride.max()))
             yi = self._forward_once(xi)[0]  # forward
@@ -280,20 +289,21 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
-    for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
+    # from（从哪一层过来-1可以理解就是上一层，-1在代码中表示其实就是每次都取列表ch的最后一个元素）, number（重复的次数）, module, args
+    for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):
         m = eval(m) if isinstance(m, str) else m  # eval strings
         for j, a in enumerate(args):
             with contextlib.suppress(NameError):
                 args[j] = eval(a) if isinstance(a, str) else a  # eval strings
 
-        n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
+        n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain gd = d['depth_multiple']
         if m in (Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, MixConv2d, Focus, CrossConv,
                  BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x):
-            c1, c2 = ch[f], args[0]
+            c1, c2 = ch[f], args[0]  # 输入通道数和输出通道数
             if c2 != no:  # if not output
-                c2 = make_divisible(c2 * gw, 8)
+                c2 = make_divisible(c2 * gw, 8)  # 输出通道再乘width_multiple进行宽度控制
 
-            args = [c1, c2, *args[1:]]
+            args = [c1, c2, *args[1:]]  # 每个layers层所需要的参数
             if m in [BottleneckCSP, C3, C3TR, C3Ghost, C3x]:
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -314,7 +324,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
         m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace('__main__.', '')  # module type
-        np = sum(x.numel() for x in m_.parameters())  # number params
+        np = sum(x.numel() for x in m_.parameters())  # number params 每层模块的总参数
         m_.i, m_.f, m_.type, m_.np = i, f, t, np  # attach index, 'from' index, type, number params
         LOGGER.info(f'{i:>3}{str(f):>18}{n_:>3}{np:10.0f}  {t:<40}{str(args):<30}')  # print
         save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist

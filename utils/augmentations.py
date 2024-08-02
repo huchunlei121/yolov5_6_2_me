@@ -49,7 +49,7 @@ class Albumentations:
             im, labels = new['image'], np.array([[c, *b] for c, b in zip(new['class_labels'], new['bboxes'])])
         return im, labels
 
-
+# 归一化
 def normalize(x, mean=IMAGENET_MEAN, std=IMAGENET_STD, inplace=False):
     # Denormalize RGB images x per ImageNet stats in BCHW format, i.e. = (x - mean) / std
     return TF.normalize(x, mean, std, inplace=inplace)
@@ -61,7 +61,7 @@ def denormalize(x, mean=IMAGENET_MEAN, std=IMAGENET_STD):
         x[:, i] = x[:, i] * std[i] + mean[i]
     return x
 
-
+# 色调-饱和度-亮度的图像增强
 def augment_hsv(im, hgain=0.5, sgain=0.5, vgain=0.5):
     # HSV color-space augmentation
     if hgain or sgain or vgain:
@@ -78,6 +78,7 @@ def augment_hsv(im, hgain=0.5, sgain=0.5, vgain=0.5):
         cv2.cvtColor(im_hsv, cv2.COLOR_HSV2BGR, dst=im)  # no return needed
 
 
+# 直方图均衡化增强
 def hist_equalize(im, clahe=True, bgr=False):
     # Equalize histogram on BGR image 'im' with im.shape(n,m,3) and range 0-255
     yuv = cv2.cvtColor(im, cv2.COLOR_BGR2YUV if bgr else cv2.COLOR_RGB2YUV)
@@ -107,13 +108,31 @@ def replicate(im, labels):
 
 
 def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
+    """
+    将图片缩放调整到指定大小
+    @Param img: 原图
+    @Param new_shape: 缩放后的图片大小
+    @Param color: pad的颜色
+    @Param auto: True 保证缩放后的图片保持原图的比例 即 将原图最长边缩放到指定大小，再将原图较短边按原图比例缩放（不会失真）---正方形推理(square lnference/training)做法
+                 False 将原图最长边（缩放因子小的边）缩放到指定大小，再将原图较短边按原图比例缩放,最后将较短边两边pad操作缩放到最长边大小（不会失真）---矩形推理(Rectangular Inference/training) 做法
+    @Param scale_fill: True 简单粗暴的将原图resize到指定的大小 相当于就是resize 没有pad操作（失真）
+    @Param scale_up: True  对于小于new_shape的原图进行缩放,大于的不变
+                     False 对于大于new_shape的原图进行缩放,小于的不变
+    @return: img: letterbox后的图片
+             ratio: wh ratios
+             (dw, dh): w和h的pad
+    """
     # Resize and pad image while meeting stride-multiple constraints
     shape = im.shape[:2]  # current shape [height, width]
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)
 
-    # Scale ratio (new / old)
+    # Scale ratio (new / old) 计算缩放因子， 取倍数小的
     r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    """
+    缩放(resize)到输入大小img_size的时候,如果没有设置上采样的话,则只进行下采样 
+    因为上采样图片会让图片模糊,对训练不友好且影响性能。
+    """
     if not scaleup:  # only scale down, do not scale up (for better val mAP)
         r = min(r, 1.0)
 
@@ -121,24 +140,26 @@ def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleF
     ratio = r, r  # width, height ratios
     new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
     dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
-    if auto:  # minimum rectangle
+    if auto:  # minimum rectangle  获取最小矩形填充，保证填充后是stride最大值的整数倍即可
         dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
+    # 如果scaleFill = True,则不进行填充，直接resize成img_size,任由图片进行拉伸和压缩
     elif scaleFill:  # stretch
         dw, dh = 0.0, 0.0
         new_unpad = (new_shape[1], new_shape[0])
         ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
-
+    # 计算上下左右到填充,即将padding分到上下，左右两侧
     dw /= 2  # divide padding into 2 sides
     dh /= 2
-
+    # 将原图resize到new_unpad
     if shape[::-1] != new_unpad:  # resize
         im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
-    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))  # 计算上下两侧的padding
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))  # 计算左右两侧的padding
+    # 调用cv2.copyMakeBorder函数进行背景填充。
     im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
     return im, ratio, (dw, dh)
 
-
+# 随机透视变换
 def random_perspective(im,
                        targets=(),
                        segments=(),
@@ -154,30 +175,32 @@ def random_perspective(im,
     height = im.shape[0] + border[0] * 2  # shape(h,w,c)
     width = im.shape[1] + border[1] * 2
 
-    # Center
+    # Center 计算中心点
     C = np.eye(3)
     C[0, 2] = -im.shape[1] / 2  # x translation (pixels)
     C[1, 2] = -im.shape[0] / 2  # y translation (pixels)
 
-    # Perspective
+    # Perspective 透视
     P = np.eye(3)
     P[2, 0] = random.uniform(-perspective, perspective)  # x perspective (about y)
     P[2, 1] = random.uniform(-perspective, perspective)  # y perspective (about x)
 
+    # 旋转缩放
     # Rotation and Scale
     R = np.eye(3)
     a = random.uniform(-degrees, degrees)
     # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
     s = random.uniform(1 - scale, 1 + scale)
     # s = 2 ** random.uniform(-scale, scale)
+    # 图片旋转得到仿射变化矩阵赋给R的前两行
     R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
 
-    # Shear
+    # Shear（剪切）
     S = np.eye(3)
     S[0, 1] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # x shear (deg)
     S[1, 0] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # y shear (deg)
 
-    # Translation
+    # Translation 图像的随机转化的参数
     T = np.eye(3)
     T[0, 2] = random.uniform(0.5 - translate, 0.5 + translate) * width  # x translation (pixels)
     T[1, 2] = random.uniform(0.5 - translate, 0.5 + translate) * height  # y translation (pixels)
@@ -186,8 +209,10 @@ def random_perspective(im,
     M = T @ S @ R @ P @ C  # order of operations (right to left) is IMPORTANT
     if (border[0] != 0) or (border[1] != 0) or (M != np.eye(3)).any():  # image changed
         if perspective:
+            # cv2.warpPerspective透视变换函数，可保持直线不变形，但是平行线可能不再平行
             im = cv2.warpPerspective(im, M, dsize=(width, height), borderValue=(114, 114, 114))
         else:  # affine
+            # cv2.warpAffine放射变换函数，可实现旋转，平移，缩放，并且变换后的平行线依旧平行
             im = cv2.warpAffine(im, M[:2], dsize=(width, height), borderValue=(114, 114, 114))
 
     # Visualize
@@ -261,6 +286,15 @@ def copy_paste(im, labels, segments, p=0.5):
 
 def cutout(im, labels, p=0.5):
     # Applies image cutout augmentation https://arxiv.org/abs/1708.04552
+    """
+    用在LoadImagesAndLabels模块中的__getitem__函数进行cutout增强  v5源码作者默认是没用用这个的 感兴趣的可以测试一下
+    cutout数据增强, 给图片随机添加随机大小的方块噪声  目的是提高泛化能力和鲁棒性
+    实现：随机选择一个固定大小的正方形区域，然后采用全0填充就OK了，当然为了避免填充0值对训练的影响，应该要对数据进行中心归一化操作，norm到0。
+    :params image: 一张图片 [640, 640, 3] numpy
+    :params labels: 这张图片的标签 [N, 5]=[N, cls+x1y1x2y2]
+    :return labels: 筛选后的这张图片的标签 [M, 5]=[M, cls+x1y1x2y2]  M<N
+                    筛选: 如果随机生成的噪声和原始的gt框相交区域占gt框太大 就筛出这个gt框label
+    """
     if random.random() < p:
         h, w = im.shape[:2]
         scales = [0.5] * 1 + [0.25] * 2 + [0.125] * 4 + [0.0625] * 8 + [0.03125] * 16  # image size fraction

@@ -244,6 +244,19 @@ def init_seeds(seed=0, deterministic=False):
 
 
 def intersect_dicts(da, db, exclude=()):
+    """
+        字典推导式
+        # 遍历 da 的所有键值对
+            for k, v in da.items():
+                # 检查 k 是否在 db 中
+                if k in db:
+                    # 检查 k 是否不包含在 exclude 列表中的任何一个字符串
+                    if not any(x in k for x in exclude):
+                        # 检查 v 的形状是否与 db[k] 的形状相同
+                        if v.shape == db[k].shape:
+                            # 如果满足所有条件，将键值对添加到过滤后的字典中
+                            filtered_dict[k] = v
+    """
     # Dictionary intersection of matching keys and shapes, omitting 'exclude' keys, using da values
     return {k: v for k, v in da.items() if k in db and not any(x in k for x in exclude) and v.shape == db[k].shape}
 
@@ -620,7 +633,7 @@ def download(url, dir='.', unzip=True, delete=True, curl=False, threads=1, retry
 
 
 def make_divisible(x, divisor):
-    # Returns nearest x divisible by divisor
+    # Returns nearest x divisible by divisor 返回比x大的，能除的尽divisor的最小的值
     if isinstance(divisor, torch.Tensor):
         divisor = int(divisor.max())  # to int
     return math.ceil(x / divisor) * divisor

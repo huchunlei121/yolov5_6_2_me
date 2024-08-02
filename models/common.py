@@ -154,7 +154,12 @@ class C3(nn.Module):
         self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
 
     def forward(self, x):
-        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+        x1 = self.cv1(x)
+        x2 = self.cv2(x)
+        x1 = self.m(x1)
+        x = torch.cat([x1, x2], 1)
+        return self.cv3(x)
+        # return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
 
 
 class C3x(C3):
